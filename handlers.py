@@ -3,9 +3,9 @@ import asyncio
 import platform
 import psutil
 
-from aiogram import types, F, Router
+from aiogram import types, F, Router, Bot
 from aiogram.filters.command import Command
-from aiogram.types import CallbackQuery
+from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 import aiohttp
@@ -15,6 +15,12 @@ from config import ADMIN_ID
 
 from keyboards import main_menu
 from keyboards import ping_menu
+
+from sqlalchemy.exc import IntegrityError
+from database.core import async_session_maker
+from database.models import Server
+from database.requests import get_servers
+from utils import ping_ip
 
 router = Router()
 
@@ -59,6 +65,12 @@ async def load_cpu_ram() -> str:
     ram_usage = psutil.virtual_memory()
 
     return f"CPU: {cpu_usage} %\nRam: {ram_usage[2]} % ({round(ram_usage[3]/1024**3, 1)} / {round(ram_usage[0]/1024**3, 1)})"
+
+# Вспомогательная функция, которая делает пинг и возвращает строку-отчет
+async def check_server(server):
+    is_online = await ping_ip(server.ip)
+    status_icon = "✅" if is_online else "❌"
+    return f"{status_icon} <b>{server.name}</b> ({server.ip})\n"
 
 # Команда /start
 @router.message(Command("start"))
@@ -136,48 +148,82 @@ async def stat_handler(callback: CallbackQuery):
     else:
         await callback.message.answer("Тебе сюда нельзя.")
 
+# Добавление сервера в БД по IP
 @router.message(Command("add"))
 async def add_server_handler(message: types.Message):
-    # 1. Парсим текст сообщения
-    # Ожидаем формат: /add 10.0.0.55 MyServer
+    # 1. Парсим текст (как раньше)
     try:
-        # split() разобьет строку по пробелам.
-        # cmd = "/add", ip = "...", hostname = "..."
-        cmd, ip, hostname = message.text.split()
+        # message.text = "/add 10.0.0.1 Web"
+        # split(maxsplit=2) означает: рубим на 3 части максимум (cmd, ip, name)
+        # Если имя будет с пробелами "My Web Server", оно попадет в name целиком
+        cmd, ip, name = message.text.split(maxsplit=2)
     except ValueError:
-        await message.answer("❌ Неверный формат!\nПиши так: `/add 10.0.0.1 ServerName`")
+        await message.answer("Формат: `/add IP Название`")
         return
 
-    # 2. Готовим данные для API (JSON)
-    # Эти поля должны совпадать с твоей Pydantic-схемой ServerCreate в API!
-    # CPU и RAM пока зашьем жестко (для простоты), или можно тоже парсить
-    server_data = {
-        "ip": ip,
-        "hostname": hostname,
-        "cpu_cores": 2,  # Заглушка
-        "ram_gb": 4      # Заглушка
-    }
-
-    # 3. Отправляем запрос (Магия aiohttp)
-    async with aiohttp.ClientSession() as session:
-        try:
-            # url должен совпадать с твоим API!
-            url = "http://127.0.0.1:8000/create_server"
+    # 2. Работаем с БД
+    try:
+        # Открываем сессию (как файл: open...)
+        async with async_session_maker() as session:
+            # Создаем объект
+            new_server = Server(ip=ip, name=name)
             
-            async with session.post(url, json=server_data) as response:
-                # 4. Проверяем ответ сервера
-                if response.status == 200:
-                    # Успех!
-                    result = await response.json() # Если API что-то вернуло
-                    await message.answer(f"✅ Сервер **{hostname}** ({ip}) успешно добавлен в Базу Данных!")
-                else:
-                    # Ошибка (например, 400 - такой IP уже есть)
-                    error_text = await response.text()
-                    await message.answer(f"⚠️ Ошибка API ({response.status}):\n{error_text}")
+            # Добавляем в "корзину"
+            session.add(new_server)
+            
+            # Отправляем в базу (сохраняем)
+            await session.commit()
+            
+        await message.answer(f"✅ Сервер **{name}** сохранен!", parse_mode="Markdown")
+        
+    except IntegrityError:
+        # Эта ошибка вылетит, если IP уже есть (unique=True)
+        await message.answer("⛔ Такой IP уже есть в базе.")
+        
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
 
-        except Exception as e:
-            # Если API выключен или нет сети
-            await message.answer(f"⛔ Не удалось соединиться с API:\n{e}")
+# Просмотр всех серверов из БД
+@router.message(Command("list"))
+async def cmd_list(message: Message):
+    servers = await get_servers()
+    
+    if not servers:
+        await message.answer("Список серверов пуст.")
+        return
+
+    # Формируем красивый ответ
+    response_text = "🖥 <b>Список серверов:</b>\n\n"
+    for server in servers:
+        # Предполагаем, что в модели есть поля name и ip
+        response_text += f"🔹 <b>{server.name}</b>: <code>{server.ip}</code>\n"
+    
+    await message.answer(response_text)
+
+# Пинг сразу всех серверов
+@router.message(Command("check_all"))
+async def cmd_check_all(message: Message):
+    servers = await get_servers()
+    
+    if not servers:
+        await message.answer("Нечего проверять, база пуста.")
+        return
+
+    await message.answer("⏳ Начинаю проверку всех серверов...")
+
+    # 1. Создаем список задач (Tasks). Мы НЕ ждем их тут (await), мы только планируем.
+    tasks = []
+    for server in servers:
+        # Создаем задачу для каждого сервера
+        tasks.append(check_server(server))
+
+    # 2. Запускаем их все разом и ждем, пока ВСЕ закончат
+    results = await asyncio.gather(*tasks)
+
+    # 3. Формируем отчет из результатов
+    report = "📊 <b>Отчет о состоянии:</b>\n\n" + "".join(results)
+    
+    await message.answer(report)
 
 # Обработка кнопки "Поддержка"
 @router.callback_query(F.data == "cmd_support")
