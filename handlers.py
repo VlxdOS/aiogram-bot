@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 from aiogram import types, Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery 
@@ -7,86 +8,102 @@ from aiogram.types import Message, CallbackQuery
 from sqlalchemy.exc import IntegrityError
 from database.core import async_session_maker
 from database.models import Server
-from database.requests import get_servers
+from database.requests import get_servers, delete_server
 
-# Импорт утилит и кнопок
-from utils import ping_ip
-from keyboards import main_menu 
+# Импорт утилит
+from utils import ping_ip, generate_password, get_system_load
+from keyboards import main_menu
 
 router = Router()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 async def format_server_status(server):
-    """
-    Пингует сервер и возвращает строку для отчета.
-    Используется внутри /check_all для asyncio.gather
-    """
     is_online = await ping_ip(server.ip)
-    status_icon = "✅" if is_online else "❌"
-    # Форматируем строку (HTML теги работают, т.к. мы включили их в main.py)
+    status_icon = "🟢" if is_online else "🔴"
     return f"{status_icon} <b>{server.name}</b> (<code>{server.ip}</code>)\n"
 
-# --- ХЭНДЛЕРЫ ---
+# --- ОСНОВНЫЕ КОМАНДЫ ---
 
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
-        "👋 <b>Привет, Админ!</b>\n\n"
-        "Доступные команды:\n"
-        "/add IP Name - Добавить сервер\n"
-        "/list - Список серверов\n"
-        "/check_all - Проверить состояние всех",
-        reply_markup=main_menu # 👈 ПРИКРЕПЛЯЕМ КНОПКИ СЮДА
+        "👋 <b>Панель управления серверами</b>\n\n"
+        "Выберите действие в меню или используйте команды:\n"
+        "/add IP Name - Добавить\n"
+        "/del IP - Удалить\n",
+        reply_markup=main_menu
     )
 
 @router.message(Command("add"))
 async def add_server_handler(message: types.Message):
-    # Разбираем сообщение: /add 8.8.8.8 Google DNS
     try:
-        # maxsplit=2 позволяет имени содержать пробелы
+        # Разбиваем сообщение
         _, ip, name = message.text.split(maxsplit=2)
+        
+        # 👇 ДОБАВЛЯЕМ ПРОВЕРКУ IP
+        # Если ip не валидный, эта строчка вызовет ошибку ValueError
+        ipaddress.ip_address(ip) 
+        
     except ValueError:
-        await message.answer("⚠️ <b>Формат:</b> <code>/add IP Название</code>")
+        await message.answer(
+            "⚠️ <b>Ошибка формата!</b>\n\n"
+            "Нужно: <code>/add IP Название</code>\n"
+            "Пример: <code>/add 8.8.8.8 Google DNS</code>\n\n"
+            "<i>Похоже, вы ввели некорректный IP или перепутали местами IP и Имя.</i>"
+        )
         return
 
-    # Запись в БД
+    # Если проверка прошла, пишем в базу
     try:
         async with async_session_maker() as session:
             new_server = Server(ip=ip, name=name)
             session.add(new_server)
             await session.commit()
-            
-        await message.answer(f"✅ Сервер <b>{name}</b> ({ip}) сохранен!")
-        
+        await message.answer(f"✅ Сервер <b>{name}</b> ({ip}) добавлен!")
     except IntegrityError:
-        await message.answer("⛔ Такой IP уже есть в базе.")
+        await message.answer("⛔ Такой IP уже есть.")
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
+# Новая команда удаления
+@router.message(Command("del"))
+async def del_server_handler(message: types.Message):
+    try:
+        _, ip = message.text.split(maxsplit=1)
+        ip = ip.strip() # <--- Убираем пробелы по краям
+    except ValueError:
+        await message.answer("⚠️ Пример: <code>/del 8.8.8.8</code>")
+        return
+
+    await delete_server(ip)
+    await message.answer(f"🗑 Сервер с IP <code>{ip}</code> удален (если он был).")
+
+# --- КНОПКИ ГЛАВНОГО МЕНЮ ---
+
+# 1. Список серверов (List)
 @router.message(Command("list"))
 @router.callback_query(F.data == "cmd_list")
 async def cmd_list(event: Message | CallbackQuery):
-    # Если это кнопка, нам нужно ответить на callback (чтобы часики пропали)
     if isinstance(event, CallbackQuery):
         await event.answer()
-        message = event.message # Получаем объект сообщения из кнопки
+        message = event.message
     else:
         message = event
 
-    # Дальше логика та же...
     servers = await get_servers()
-    # ... (твой код вывода списка) ...
     if not servers:
-        await message.answer("📭 Список серверов пуст.")
+        await message.answer("📭 Список пуст.")
         return
-        
-    response_text = "🖥 <b>Список серверов:</b>\n\n"
-    for server in servers:
-        response_text += f"🔹 <b>{server.name}</b>: <code>{server.ip}</code>\n"
-    
-    await message.answer(response_text)
 
+    # Собираем текст. ВАЖНО: += добавляет строку к предыдущей
+    text = "🖥 <b>Список серверов:</b>\n\n"
+    for server in servers:
+        text += f"🔹 <b>{server.name}</b>: <code>{server.ip}</code>\n"
+    
+    await message.answer(text)
+
+# 2. Проверить всё (Check All)
 @router.message(Command("check_all"))
 @router.callback_query(F.data == "cmd_check_all")
 async def cmd_check_all(event: Message | CallbackQuery):
@@ -97,26 +114,48 @@ async def cmd_check_all(event: Message | CallbackQuery):
         message = event
 
     servers = await get_servers()
-    
     if not servers:
-        await message.answer("📭 Нечего проверять, база пуста.")
+        await message.answer("📭 База пуста.")
         return
 
-    status_msg = await message.answer("⏳ <b>Пингую серверы...</b>")
+    status_msg = await message.answer("⏳ <b>Проверка доступности...</b>")
 
-    # Создаем список задач (Tasks)
     tasks = [format_server_status(server) for server in servers]
-
-    # Запускаем все пинги параллельно
     results = await asyncio.gather(*tasks)
-
-    # Собираем отчет
-    report = "📊 <b>Отчет о состоянии:</b>\n\n" + "".join(results)
     
-    # Редактируем старое сообщение, чтобы не спамить
+    # join склеивает список результатов в одну строку
+    report = "📊 <b>Статус серверов:</b>\n\n" + "".join(results)
+    
     await status_msg.edit_text(report)
 
-# Эхо-хэндлер для всего остального
+# 3. Статистика (просто считаем количество)
+@router.callback_query(F.data == "cmd_stats")
+async def cmd_stats(callback: CallbackQuery):
+    await callback.answer()
+    servers = await get_servers()
+    await callback.message.answer(f"📊 Всего серверов в базе: <b>{len(servers)}</b>")
+
+# 4. Нагрузка (System Load)
+@router.callback_query(F.data == "cmd_load")
+async def cmd_load(callback: CallbackQuery):
+    await callback.answer("Замеряю нагрузку...") # Показывает всплывашку сверху
+    stats = get_system_load()
+    await callback.message.answer(stats)
+
+# 5. Генератор пароля
+@router.callback_query(F.data == "cmd_genpass")
+async def cmd_genpass(callback: CallbackQuery):
+    await callback.answer()
+    pwd = generate_password(10)
+    await callback.message.answer(f"🔑 Твой пароль: <code>{pwd}</code>")
+
+# 6. Поддержка
+@router.callback_query(F.data == "cmd_support")
+async def cmd_support(callback: CallbackQuery):
+    await callback.answer()
+    await callback.message.answer("👨‍💻 По всем вопросам пиши @v1ad_shi1ov")
+
+# Эхо
 @router.message()
 async def echo_handler(message: types.Message):
-    await message.answer("Не понимаю команду. Используй /start")
+    await message.answer("Я не понимаю эту команду. Жми /start")
