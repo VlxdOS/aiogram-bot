@@ -10,6 +10,7 @@ from aiogram.enums import ParseMode
 # Импортируем настройки из конфига (добавь туда PROXY_URL)
 from config import BOT_TOKEN, PROXY_URL 
 from handlers import router
+from monitoring import start_monitoring
 
 from database.core import engine, Base
 # from database.models import Server # Можно убрать, если models импортируется внутри handlers или requests
@@ -46,6 +47,11 @@ async def main():
     # Удаляем старые апдейты, чтобы бот не отвечал на сообщения, пришедшие пока он спал
     await bot.delete_webhook(drop_pending_updates=True)
     
+    
+    # 👇 ЗАПУСКАЕМ МОНИТОРИНГ В ФОНЕ
+    # create_task создает "ответвление", которое работает само по себе
+    asyncio.create_task(start_monitoring(bot))
+
     # Погнали!
     print("✅ Бот работает!")
     await dp.start_polling(bot)

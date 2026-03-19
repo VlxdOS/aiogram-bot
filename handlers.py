@@ -1,289 +1,122 @@
-import ipaddress
 import asyncio
-import platform
-import psutil
+from aiogram import types, Router, F
+from aiogram.filters import Command
+from aiogram.types import Message, CallbackQuery 
 
-from aiogram import types, F, Router, Bot
-from aiogram.filters.command import Command
-from aiogram.types import CallbackQuery, Message
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.context import FSMContext
-import aiohttp
-import random, string
-
-from config import ADMIN_ID
-
-from keyboards import main_menu
-from keyboards import ping_menu
-
+# Импорты БД
 from sqlalchemy.exc import IntegrityError
 from database.core import async_session_maker
 from database.models import Server
 from database.requests import get_servers
+
+# Импорт утилит и кнопок
 from utils import ping_ip
+from keyboards import main_menu 
 
 router = Router()
 
-class PingStates(StatesGroup):
-    waiting_for_ip = State()
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
-class GenPassStates(StatesGroup):
-    waiting_for_len = State()
-
-async def real_ping(ip_address: str) -> bool:
+async def format_server_status(server):
     """
-    Асинхронно пингует IP. Возвращает True, если хост доступен.
+    Пингует сервер и возвращает строку для отчета.
+    Используется внутри /check_all для asyncio.gather
     """
-    # Определяем параметры пинга в зависимости от ОС
-    # -n 1 (Windows) или -c 1 (Linux/Mac) - количество пакетов
-    param = '-n' if platform.system().lower() == 'windows' else '-c'
-    
-    # Запускаем процесс пинга в системе
-    # stdout=asyncio.subprocess.DEVNULL означает "не выводи текст пинга в консоль бота"
-    process = await asyncio.create_subprocess_shell(
-        f"ping {param} 1 {ip_address}",
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL
-    )
-    
-    # Ждем завершения процесса
-    await process.wait()
-    
-    # Если код возврата 0 -> Успех. Если 1 или другое -> Ошибка.
-    return process.returncode == 0
-
-async def check_disk_space() -> str:
-    DISK = "C:"
-    free = psutil.disk_usage(DISK).free/(1024*1024*1024)
-
-    return f"{free:.2f} Gb свободно на диске {DISK}"
-
-async def load_cpu_ram() -> str:
-    loop = asyncio.get_running_loop()
-
-    cpu_usage = await loop.run_in_executor(None, psutil.cpu_percent, 1)
-    ram_usage = psutil.virtual_memory()
-
-    return f"CPU: {cpu_usage} %\nRam: {ram_usage[2]} % ({round(ram_usage[3]/1024**3, 1)} / {round(ram_usage[0]/1024**3, 1)})"
-
-# Вспомогательная функция, которая делает пинг и возвращает строку-отчет
-async def check_server(server):
     is_online = await ping_ip(server.ip)
     status_icon = "✅" if is_online else "❌"
-    return f"{status_icon} <b>{server.name}</b> ({server.ip})\n"
+    # Форматируем строку (HTML теги работают, т.к. мы включили их в main.py)
+    return f"{status_icon} <b>{server.name}</b> (<code>{server.ip}</code>)\n"
 
-# Команда /start
+# --- ХЭНДЛЕРЫ ---
+
 @router.message(Command("start"))
 async def cmd_start(message: types.Message):
-    if message.from_user.id == ADMIN_ID or message.from_user.username == "NastyaSmolentseva":
-        await message.answer("Привет, Админ!", reply_markup=main_menu)
-    else:
-        await message.answer("Привет, юзер!")
+    await message.answer(
+        "👋 <b>Привет, Админ!</b>\n\n"
+        "Доступные команды:\n"
+        "/add IP Name - Добавить сервер\n"
+        "/list - Список серверов\n"
+        "/check_all - Проверить состояние всех",
+        reply_markup=main_menu # 👈 ПРИКРЕПЛЯЕМ КНОПКИ СЮДА
+    )
 
-# Обработка кнопки "Проверка диска"
-@router.callback_query(F.data == "cmd_check_disk")
-async def check_disk(callback: CallbackQuery):
-    await callback.answer()
-    result = await check_disk_space()
-    await callback.message.answer(f"Вывод: {result}")
-
-# Обработка кнопки "Нагрузка"
-@router.callback_query(F.data == "cmd_load")
-async def cpu_load(callback: CallbackQuery):
-    await callback.answer()
-    result = await load_cpu_ram()
-    await callback.message.answer(f"{result}")
-
-# Генератор паролей
-@router.message(Command("genpass"))
-async def genpass(message: types.Message):
-    args = message.text.split()
-
-    if len(args) == 1:
-        length = 12
-    elif len(args) > 1:
-        try:
-            length = int(args[1])
-        except ValueError:
-            await message.answer("Ошибка! Длина должна быть числом!")
-            return
-    
-    chars = string.ascii_letters + string.digits
-    password = ''.join(random.choice(chars) for _ in range(length))
-    
-    await message.answer(f"Вот ваш пароль: `{password}`", parse_mode="Markdown")
-
-# Обработка кнопки "Генерация пароля"
-@router.callback_query(F.data == "cmd_genpass")
-async def stat_genpass(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await callback.message.answer("Введите длину пароля:", reply_markup=ping_menu)
-    # Бот теперь ждет длину
-    await state.set_state(GenPassStates.waiting_for_len)
-
-# Обработка длины пароля
-@router.message(GenPassStates.waiting_for_len)
-async def process_ip(message: types.Message, state: FSMContext):
-    length = message.text
-
-    try:
-        length_int = int(length)
-
-        chars = string.ascii_letters + string.digits
-        password = ''.join(random.choice(chars) for _ in range(int(length_int)))
-
-        await message.answer(f"Вот ваш пароль: `{password}`", parse_mode="Markdown")
-
-        await state.clear()
-    except ValueError:
-        await message.answer("Ошибка! Длина должна быть числом! Попробуйте ещё раз")
-        return   
-
-# Обработка кнопки "Статистика"
-@router.callback_query(F.data == "cmd_stats")
-async def stat_handler(callback: CallbackQuery):
-    await callback.answer()
-    if callback.from_user.id == ADMIN_ID:
-        await callback.message.answer("Статистика: Сервер работает нормально! 📈")
-    else:
-        await callback.message.answer("Тебе сюда нельзя.")
-
-# Добавление сервера в БД по IP
 @router.message(Command("add"))
 async def add_server_handler(message: types.Message):
-    # 1. Парсим текст (как раньше)
+    # Разбираем сообщение: /add 8.8.8.8 Google DNS
     try:
-        # message.text = "/add 10.0.0.1 Web"
-        # split(maxsplit=2) означает: рубим на 3 части максимум (cmd, ip, name)
-        # Если имя будет с пробелами "My Web Server", оно попадет в name целиком
-        cmd, ip, name = message.text.split(maxsplit=2)
+        # maxsplit=2 позволяет имени содержать пробелы
+        _, ip, name = message.text.split(maxsplit=2)
     except ValueError:
-        await message.answer("Формат: `/add IP Название`")
+        await message.answer("⚠️ <b>Формат:</b> <code>/add IP Название</code>")
         return
 
-    # 2. Работаем с БД
+    # Запись в БД
     try:
-        # Открываем сессию (как файл: open...)
         async with async_session_maker() as session:
-            # Создаем объект
             new_server = Server(ip=ip, name=name)
-            
-            # Добавляем в "корзину"
             session.add(new_server)
-            
-            # Отправляем в базу (сохраняем)
             await session.commit()
             
-        await message.answer(f"✅ Сервер **{name}** сохранен!", parse_mode="Markdown")
+        await message.answer(f"✅ Сервер <b>{name}</b> ({ip}) сохранен!")
         
     except IntegrityError:
-        # Эта ошибка вылетит, если IP уже есть (unique=True)
         await message.answer("⛔ Такой IP уже есть в базе.")
-        
     except Exception as e:
         await message.answer(f"Ошибка: {e}")
 
-# Просмотр всех серверов из БД
 @router.message(Command("list"))
-async def cmd_list(message: Message):
-    servers = await get_servers()
-    
-    if not servers:
-        await message.answer("Список серверов пуст.")
-        return
+@router.callback_query(F.data == "cmd_list")
+async def cmd_list(event: Message | CallbackQuery):
+    # Если это кнопка, нам нужно ответить на callback (чтобы часики пропали)
+    if isinstance(event, CallbackQuery):
+        await event.answer()
+        message = event.message # Получаем объект сообщения из кнопки
+    else:
+        message = event
 
-    # Формируем красивый ответ
+    # Дальше логика та же...
+    servers = await get_servers()
+    # ... (твой код вывода списка) ...
+    if not servers:
+        await message.answer("📭 Список серверов пуст.")
+        return
+        
     response_text = "🖥 <b>Список серверов:</b>\n\n"
     for server in servers:
-        # Предполагаем, что в модели есть поля name и ip
         response_text += f"🔹 <b>{server.name}</b>: <code>{server.ip}</code>\n"
     
     await message.answer(response_text)
 
-# Пинг сразу всех серверов
 @router.message(Command("check_all"))
-async def cmd_check_all(message: Message):
+@router.callback_query(F.data == "cmd_check_all")
+async def cmd_check_all(event: Message | CallbackQuery):
+    if isinstance(event, CallbackQuery):
+        await event.answer()
+        message = event.message
+    else:
+        message = event
+
     servers = await get_servers()
     
     if not servers:
-        await message.answer("Нечего проверять, база пуста.")
+        await message.answer("📭 Нечего проверять, база пуста.")
         return
 
-    await message.answer("⏳ Начинаю проверку всех серверов...")
+    status_msg = await message.answer("⏳ <b>Пингую серверы...</b>")
 
-    # 1. Создаем список задач (Tasks). Мы НЕ ждем их тут (await), мы только планируем.
-    tasks = []
-    for server in servers:
-        # Создаем задачу для каждого сервера
-        tasks.append(check_server(server))
+    # Создаем список задач (Tasks)
+    tasks = [format_server_status(server) for server in servers]
 
-    # 2. Запускаем их все разом и ждем, пока ВСЕ закончат
+    # Запускаем все пинги параллельно
     results = await asyncio.gather(*tasks)
 
-    # 3. Формируем отчет из результатов
+    # Собираем отчет
     report = "📊 <b>Отчет о состоянии:</b>\n\n" + "".join(results)
     
-    await message.answer(report)
+    # Редактируем старое сообщение, чтобы не спамить
+    await status_msg.edit_text(report)
 
-# Обработка кнопки "Поддержка"
-@router.callback_query(F.data == "cmd_support")
-async def support_handler(callback: CallbackQuery):
-    await callback.answer()
-    await callback.message.answer("Пиши сюда: @v1ad_shi1ov")
-
-# Обработка кнопки "Пинг"
-@router.callback_query(F.data == "cmd_ping")
-async def start_ping(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-    await callback.message.answer("Введите IP-адрес для проверки:", reply_markup=ping_menu)
-    # ПЕРЕКЛЮЧАЕМ ТУМБЛЕР! Бот теперь ждет IP
-    await state.set_state(PingStates.waiting_for_ip)
-
-# Отмена действия
-@router.callback_query(F.data == "cmd_cancel")
-async def support_handler(callback: CallbackQuery, state: FSMContext):
-    await callback.answer()
-
-    current_state = await state.get_state()
-    if current_state is None:
-        await callback.message.answer("Нечего отменять")
-        return
-    
-    await state.clear()
-    await callback.message.answer("❌ Действие отменено. Вы вернулись в меню", reply_markup=main_menu)
-
-# Обработка IP
-@router.message(PingStates.waiting_for_ip)
-async def process_ip(message: types.Message, state: FSMContext):
-    ip = message.text
-    try:
-        ip = ipaddress.ip_address(ip)
-        await message.answer(f"Пингую {ip}...")
-        is_online = await real_ping(message.text)
-        if is_online:
-            await message.answer(f"✅ {ip} пингуется")
-        else:
-            await message.answer(f"⚠️ {ip} не отвечает")
-        # СБРАСЫВАЕМ СОСТОЯНИЕ (Возвращаем бота в обычный режим)
-        await state.clear()
-    except ValueError:
-        await message.answer(f"❌ Это не похоже на IP-адрес. Попробуй еще раз (например, 8.8.8.8)")
-
-# Ловим "потерянные" нажатия кнопок (на всякий случай)
-@router.callback_query()
-async def missed_callback_handler(callback: CallbackQuery):
-    await callback.answer()
-    # Логика для админа/Насти, если они нажали какую-то левую кнопку
-
-# Эхо-хэндлер (Ловит всё остальное, что не попало в фильтры выше)
+# Эхо-хэндлер для всего остального
 @router.message()
 async def echo_handler(message: types.Message):
-    # Асинхронно отправляем ответ
-    username = message.from_user.username
-    # if message.from_user.id == ADMIN_ID:
-    await message.answer(f"Добро пожаловать, {message.from_user.full_name}!")
-    await message.answer(f"Выбери действие:", reply_markup=main_menu)
-    if username == "NastyaSmolentseva":
-        await message.answer(f"Ты ж моё солнышко❤️❤️❤️")
-    # else:
-        # await message.answer(f"Тебе сюда нельзя")
+    await message.answer("Не понимаю команду. Используй /start")

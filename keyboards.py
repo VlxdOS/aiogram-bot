@@ -1,25 +1,31 @@
+# keyboards.py
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Создаем кнопки
-# Обрати внимание: теперь есть callback_data
-btn_stat = InlineKeyboardButton(text="📊 Статистика", callback_data="cmd_stats")
-btn_support = InlineKeyboardButton(text="🆘 Поддержка", callback_data="cmd_support")
-btn_ping = InlineKeyboardButton(text="🌐 Пинг", callback_data="cmd_ping")
-btn_cancel = InlineKeyboardButton(text="❌ Отмена", callback_data="cmd_cancel")
-btn_genpass = InlineKeyboardButton(text="🔑 Пароль", callback_data="cmd_genpass")
-btn_disk = InlineKeyboardButton(text="Проверка диска", callback_data="cmd_check_disk")
-btn_load = InlineKeyboardButton(text="📊 Нагрузка", callback_data="cmd_load")
-
+# --- ГЛАВНОЕ МЕНЮ ---
 main_menu = InlineKeyboardMarkup(
     inline_keyboard=[
-        [btn_stat, btn_support], # Первый ряд (две кнопки вместе)
-        [btn_ping, btn_genpass],
-        [btn_disk, btn_load] 
-    ],
+        # Ряд 1: Основные функции (которые у нас уже есть в handlers.py)
+        [
+            InlineKeyboardButton(text="📋 Список", callback_data="cmd_list"),
+            InlineKeyboardButton(text="🚀 Проверить всё", callback_data="cmd_check_all")
+        ],
+        # Ряд 2: Системные метрики (скелет на будущее)
+        [
+            InlineKeyboardButton(text="📊 Статистика", callback_data="cmd_stats"),
+            InlineKeyboardButton(text="💾 Disk / CPU", callback_data="cmd_load")
+        ],
+        # Ряд 3: Утилиты (скелет)
+        [
+            InlineKeyboardButton(text="🔑 Пароль", callback_data="cmd_genpass"),
+            InlineKeyboardButton(text="🆘 Поддержка", callback_data="cmd_support")
+        ]
+    ]
 )
 
-ping_menu = InlineKeyboardMarkup(
+# --- МЕНЮ ОТМЕНЫ ---
+# Пригодится, когда будем делать диалоги (FSM)
+cancel_menu = InlineKeyboardMarkup(
     inline_keyboard=[
-        [btn_cancel], # Первый ряд (две кнопки вместе)
-    ],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="cmd_cancel")]
+    ]
 )
