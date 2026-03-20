@@ -11,7 +11,7 @@ from database.models import Server
 from database.requests import get_servers, delete_server
 
 # Импорт утилит
-from utils import ping_ip, generate_password, get_system_load
+from utils import ping_ip, generate_password, get_system_load, check_port_open
 from keyboards import main_menu
 
 router = Router()
@@ -155,6 +155,42 @@ async def cmd_support(callback: CallbackQuery):
     await callback.answer()
     await callback.message.answer("👨‍💻 По всем вопросам пиши @v1ad_shi1ov")
 
+@router.message(Command("check_port"))
+async def cmd_check_port(message: Message):
+    # 1. Парсинг и Валидация
+    try:
+        # Разбиваем сообщение
+        _, ip, port_str = message.text.split(maxsplit=2)        
+        
+        # Проверяем IP (вылетит ValueError если кривой)
+        ipaddress.ip_address(ip)
+
+        # Добавляем проверку порта
+        port = int(port_str)
+        if not (1 <= port <= 65535):
+            raise ValueError("Порт вне диапазона")
+        
+    except ValueError:
+        await message.answer(
+             "⚠️ <b>Ошибка формата!</b>\n"
+            "Пример: <code>/check_port 8.8.8.8 443</code>"
+        )
+        return
+    
+    # 2. Логика (выполняется только если валидация прошла)
+    await message.answer(f"⏳ Проверяю {ip}:{port}...")
+
+    try:
+        is_open = await check_port_open(ip, port)
+
+        if is_open:
+            await message.answer(f"✅ Порт <b>{port}</b> на <code>{ip}</code> <b>ОТКРЫТ</b> (доступен).")
+        else:
+            await message.answer(f"❌ Порт <b>{port}</b> на <code>{ip}</code> <b>ЗАКРЫТ</b> (или недоступен).")
+            
+    except Exception as e:
+        await message.answer(f"Ошибка: {e}")
+    
 # Эхо
 @router.message()
 async def echo_handler(message: types.Message):

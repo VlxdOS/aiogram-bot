@@ -23,7 +23,28 @@ async def ping_ip(ip: str) -> bool:
         return process.returncode == 0
     except Exception:
         return False
-    
+
+async def check_port_open(ip: int, port: str) -> bool:
+    """
+    Проверяет, открыт ли порт на указанном IP.
+    Возвращает True, если соединение прошло успешно.
+    """
+    try:
+        # Пытаемся открыть соединение
+        # wait_for убьет задачу через 3 секунды, если сервер тупит
+        conn = asyncio.open_connection(ip, port)
+        reader, writer = await asyncio.wait_for(conn, timeout=3.0)
+
+        # Если дошли сюда — порт открыт!
+        # Вежливо закрываем соединение
+        writer.close()
+        await writer.wait_closed()
+
+        return True
+    except:
+        # Любая ошибка (таймаут, отказ в доступе) = порт закрыт
+        return False
+
 def generate_password(length=12):
     chars = string.ascii_letters + string.digits + "!@#$%"
     return ''.join(random.choice(chars) for _ in range(length))
