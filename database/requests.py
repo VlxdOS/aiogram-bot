@@ -1,6 +1,7 @@
 # database/requests.py
 from database.core import async_session_maker
 from database.models import Server
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select, delete
 
 async def get_servers():
@@ -19,3 +20,17 @@ async def delete_server(ip: str):
         stmt = delete(Server).where(Server.ip == ip)
         await session.execute(stmt)
         await session.commit()
+
+async def add_server(ip: str, name: str) -> bool:
+    """
+    Добавляет сервер в БД.
+    Возвращает True если успешно, False если IP уже существует.
+    """
+    try:
+        async with async_session_maker() as session:
+            new_server = Server(ip=ip, name=name)
+            session.add(new_server)
+            await session.commit()
+        return True
+    except IntegrityError:
+        return False

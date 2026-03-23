@@ -24,7 +24,7 @@ async def ping_ip(ip: str) -> bool:
     except Exception:
         return False
 
-async def check_port_open(ip: int, port: str) -> bool:
+async def check_port_open(ip: str, port: int) -> bool:
     """
     Проверяет, открыт ли порт на указанном IP.
     Возвращает True, если соединение прошло успешно.

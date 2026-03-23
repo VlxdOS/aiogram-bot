@@ -5,10 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery 
 
 # Импорты БД
-from sqlalchemy.exc import IntegrityError
-from database.core import async_session_maker
-from database.models import Server
-from database.requests import get_servers, delete_server
+from database.requests import add_server, get_servers, delete_server
 
 # Импорт утилит
 from utils import ping_ip, generate_password, get_system_load, check_port_open
@@ -55,16 +52,12 @@ async def add_server_handler(message: types.Message):
         return
 
     # Если проверка прошла, пишем в базу
-    try:
-        async with async_session_maker() as session:
-            new_server = Server(ip=ip, name=name)
-            session.add(new_server)
-            await session.commit()
+    success = await add_server(ip, name)
+
+    if success:
         await message.answer(f"✅ Сервер <b>{name}</b> ({ip}) добавлен!")
-    except IntegrityError:
+    else:
         await message.answer("⛔ Такой IP уже есть.")
-    except Exception as e:
-        await message.answer(f"Ошибка: {e}")
 
 # Новая команда удаления
 @router.message(Command("del"))
@@ -170,9 +163,9 @@ async def cmd_check_port(message: Message):
         if not (1 <= port <= 65535):
             raise ValueError("Порт вне диапазона")
         
-    except ValueError:
+    except ValueError as e:
         await message.answer(
-             "⚠️ <b>Ошибка формата!</b>\n"
+             f"⚠️ <b>Ошибка: {e}</b>\n"
             "Пример: <code>/check_port 8.8.8.8 443</code>"
         )
         return
